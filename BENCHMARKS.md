@@ -41,9 +41,11 @@ Not all models work efficiently on the ik_llama.cpp Vulkan backend. Models with 
 
 | Model | Arch | Graph Splits | Status |
 |-------|------|-------------|--------|
-| TinyLlama 1.1B | llama | 2 | Fast |
-| Llama-2-7B | llama | 2 | Fast |
+| TinyLlama 1.1B | llama (v1) | 2 | Fast |
+| Llama-2-7B | llama (v2) | 2 | Fast |
+| Llama-2-13B | llama (v2) | 2 | Fast |
 | Llama-3.2-3B | llama | 58 | Very slow (unsupported ops per layer) |
+| Llama-3.1-8B | llama | 66 | Very slow (same issue as 3.2) |
 | Qwen3.5-4B | qwen35 (SSM+attn) | 306 | Very slow |
 | GLM-4.7-Flash | deepseek2 (MoE) | 186 | Very slow |
 
