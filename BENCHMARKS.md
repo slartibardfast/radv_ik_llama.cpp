@@ -121,6 +121,30 @@ Multi-GPU split mode graph is designed for models that **don't fit** on a single
 
 The overhead measured here would be negligible for larger models where compute time per token is much higher.
 
+#### Llama-2-13B Q8_0 (127 token prompt, 4 eval tokens, best of 3)
+
+13 GB model — fits on 6800 XT alone (14.6 GB with KV cache), but a natural candidate for splitting.
+
+| Configuration | Prompt eval | Token gen | Load time |
+|--------------|------------|-----------|-----------|
+| RX 6800 XT alone | 275 ms (462 tok/s) | 37.64 ms/tok (26.6 tok/s) | 4068 ms |
+| Both GPUs smgs 1:1 | 547 ms (232 tok/s) | 63.52 ms/tok (15.7 tok/s) | 7058 ms |
+| Both GPUs smgs 2:1 | 502 ms (253 tok/s) | 59.28 ms/tok (16.9 tok/s) | 5998 ms |
+
+Weights distribution (smgs 1:1): Vulkan0 = 6750 MiB, Vulkan1 = 6274 MiB. KV cache split: Vulkan0 = 840 MiB, Vulkan1 = 760 MiB.
+
+Multi-GPU is still slower because the model fits on one GPU. The 2:1 split is ~7% faster than 1:1 — weighting toward the faster 6800 XT reduces idle time.
+
+#### Transfer overhead scaling
+
+| Model | Size | Single GPU | Multi-GPU 1:1 | Overhead/tok |
+|-------|------|-----------|--------------|-------------|
+| TinyLlama 1.1B | 459 MiB | 11.0 ms/tok | 15.8 ms/tok | ~5 ms |
+| Llama-2-7B | 6.7 GiB | 26.0 ms/tok | 41.1 ms/tok | ~15 ms |
+| Llama-2-13B | 13.0 GiB | 37.6 ms/tok | 63.5 ms/tok | ~26 ms |
+
+The overhead scales roughly with model size. For models large enough to genuinely require splitting (>16 GB), the compute savings from not running out of VRAM far outweigh this transfer cost — the alternative is not being able to run at all.
+
 ## Runtime Flags
 
 | Flag | Purpose |
