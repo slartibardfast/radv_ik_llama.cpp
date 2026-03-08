@@ -21,6 +21,7 @@
 3. [PHASE 3: Cross-Device Tensor Copies via Host Staging](PHASE3.md) — **COMPLETE**
 4. [PHASE 4: Async Execution and Pipeline Parallelism](PHASE4.md) — **COMPLETE**
 5. [PHASE 5: Topology Discovery and Performance Tuning](PHASE5.md) — **COMPLETE**
+6. [PHASE 6: Runtime Testing, IQK Fallbacks, and lavapipe Fixes](PHASE6.md) — **COMPLETE**
 
 ## Upstreamability Notes
 
@@ -31,3 +32,4 @@
 | 3 | Medium | Cross-device copy via staging, clean fallback path |
 | 4 | Medium | Async pipeline, needs careful testing on multiple vendors |
 | 5 | Low | Read-only topology query, no behavioral change |
+| 6 | Low-Medium | Scalar fallbacks and graceful stubs improve non-AVX2 builds; lavapipe fixes are additive |

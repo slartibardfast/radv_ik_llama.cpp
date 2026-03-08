@@ -22,7 +22,7 @@
 ## Also Fixed (pre-existing submodule issues)
 - `iqk_common.h`: added missing `#include <cstdint>` for `popcount` functions
 - `iqk_quantize.cpp`: stubbed broken scalar fallback for q8_KV_R8 interleave
-- `CMakeLists.txt`: added `-mavx2 -mfma -mf16c` for iqk_quantize.cpp on x86_64 without native AVX2
+- `CMakeLists.txt`: added `-mavx2 -mfma -mf16c` for iqk_quantize.cpp on x86_64 without native AVX2 (temporarily removed during Phase 6 testing, then restored to match upstream)
 
 ## Verification
 - Full clean build with clang (zero errors, zero warnings from our files)
