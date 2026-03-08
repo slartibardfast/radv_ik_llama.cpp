@@ -702,7 +702,6 @@
                 <li><strong>Vendor-neutral</strong> &mdash; all changes use Vulkan 1.2+ spec features only. No driver-specific extensions except Phase 12 dmabuf (behind capability probe with clean fallback)</li>
                 <li><strong>NVIDIA-safe</strong> &mdash; no changes to CUDA/NCCL paths. NVIDIA's Vulkan driver supports all APIs used</li>
                 <li><strong>Host-staging model</strong> &mdash; cross-device transfers go through host memory (the only portable Vulkan approach). Phase 12 adds optional dmabuf for RADV</li>
-                <li><strong>Upstreamable</strong> &mdash; each phase can be upstreamed independently. Phase 1 benefits single-GPU Vulkan too</li>
                 <li><strong>Single file</strong> &mdash; all changes in <code>ggml/src/ggml-vulkan.cpp</code> plus minimal integration in <code>src/llama.cpp</code></li>
             </ul>
         </section>
