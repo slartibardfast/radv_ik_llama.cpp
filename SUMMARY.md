@@ -13,5 +13,8 @@
 - [Phase 10: True Async Graph Compute](PHASE10.md)
 - [Phase 11: Transfer Queue Utilization During Graph Execution](PHASE11.md)
 - [Phase 12: dmabuf Zero-Copy Cross-Device Transfer](PHASE12.md)
+- [Phase 13: Vulkan FUSED_UP_GATE Support](PHASE13.md)
+- [Phase 14: Vulkan Support for Qwen3.5 Recurrent Layers](PHASE14.md)
+- [Phase 15: Vulkan Support for GLM-4.7-Flash](PHASE15.md)
 - [Benchmarks](BENCHMARKS.md)
 - [Memory](MEMORY.md)
