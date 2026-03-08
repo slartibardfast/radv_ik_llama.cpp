@@ -29,7 +29,7 @@
 
 7. [PHASE 7: Async Cross-Device Copy Pipeline](PHASE7.md) — **COMPLETE**
 8. [PHASE 8: Double-Buffered Staging](PHASE8.md) — **COMPLETE**
-9. [PHASE 9: Parallel Split Buffer Uploads](PHASE9.md) — PLANNED
+9. [PHASE 9: Parallel Split Buffer Uploads](PHASE9.md) — **COMPLETE**
 10. [PHASE 10: True Async Graph Compute](PHASE10.md) — PLANNED
 11. [PHASE 11: Transfer Queue Utilization During Graph Execution](PHASE11.md) — PLANNED
 12. [PHASE 12: dmabuf Zero-Copy Cross-Device Transfer (RADV)](PHASE12.md) — PLANNED (optional)
