@@ -34,6 +34,17 @@
 - **FUSED_UP_GATE M=1 NMSE instability**: Single-element output near zero produces huge NMSE from tiny absolute errors. Fixed by increasing K from 32 to 64 so the output has more signal.
 - Final test counts: 1190 standard + 143 FUSED_UP_GATE + 12 MULTI_ADD all pass on RADV VEGA10.
 
+## Nemotron Architecture Confusion (2026-03-09)
+- Target model is **Nemotron-3-Nano-30B-A3B** which uses `nemotron_h_moe` (hybrid Mamba2+Attention+MoE), NOT `LLM_ARCH_DECI`.
+- DECI is a pure transformer variant (Nemotron-51B, Ultra-253B). Different architecture entirely.
+- `nemotron_h_moe` is not recognized by our ik_llama.cpp fork — needs architecture registration, graph builder, and 5 missing Vulkan ops (SSM_CONV, SSM_SCAN, SWIGLU, ADD_ID, SET_ROWS).
+- Upstream llama.cpp (added as `llama.cpp` submodule) has full support including Vulkan shaders for all required ops.
+- MUL_MAT_ID (expert matmul) is already in our fork's Vulkan backend.
+
+## Submodule Layout Update
+- `ik_llama.cpp` — our fork with multi-GPU split mode
+- `llama.cpp` — upstream reference for nemotron_h_moe and other missing architectures
+
 ## Build Notes
 - Use clang (GCC 15 has -Wtemplate-body errors)
 - `-DGGML_IQK_FLASH_ATTENTION=OFF` on non-AVX2 hosts
