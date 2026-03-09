@@ -18,5 +18,6 @@
 - [Phase 15: Vulkan Support for GLM-4.7-Flash](PHASE15.md)
 - [Phase 16: Backend-Ops Testing and Bug Fixes](PHASE16.md)
 - [Phase 17: Vulkan Op Trace for Nemotron](PHASE17.md)
+- [Phase 18: GPU-Accelerated REDUCE via dmabuf](PHASE18.md)
 - [Benchmarks](BENCHMARKS.md)
 - [Memory](MEMORY.md)
