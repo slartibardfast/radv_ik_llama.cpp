@@ -445,3 +445,83 @@ The CPU-mediated REDUCE is a correctness implementation — not optimized. Each 
 - **dmabuf GPU-side REDUCE**: Use the existing dmabuf infrastructure to copy remote buffers as GPU→GPU, then dispatch an ADD shader. Eliminates CPU round-trip.
 - **Async pipelining**: Overlap REDUCE copies with subsequent GPU compute.
 - Currently only F32 and F16 types are supported (matches the model's `reduce_type` setting).
+
+---
+
+## Full Model Trace: Nemotron-Nano-4B (Graph Split Mode, 2 GPUs)
+
+Complete computation graph for Llama-3.1-Nemotron-Nano-4B-v1.1 (Q4_K_M) with split-mode graph on Vega + 6800 XT.
+
+### Graph Statistics
+
+- **1606 graph nodes** across **193 splits**
+- **64 REDUCE ops** (2 per layer × 32 layers)
+- Weight split: ~25% Vega (8GB) / ~75% 6800 XT (16GB)
+
+### Op Frequency
+
+| Op | Count | Per Layer | Purpose |
+|---|---|---|---|
+| `MUL_MAT` | 321 | ~10 | Q/K/V projections, Wo, up, gate, down + lm_head |
+| `CPY` | 256 | 8 | KV cache writes + F32→F16 casts for cross-device reduce |
+| `FUSED_RMS_NORM` | 129 | 4 | attn_norm + ffn_norm (×2 devices) + final output_norm |
+| `ROPE` | 128 | 4 | Q, K rotary position embedding (×2 devices) |
+| `REDUCE` | 64 | 2 | Attention combine + FFN combine |
+| `FUSED_UP_GATE` | 64 | 2 | Fused SiLU FFN (×2 devices) |
+| `FLASH_ATTN_EXT` | 64 | 2 | Flash attention (×2 devices) |
+| `ADD` | 64 | 2 | Residual connections (on Vulkan1, before REDUCE) |
+| `GET_ROWS` | 4 | — | Embedding lookup + output token selection |
+
+### Per-Layer Pattern (6 splits)
+
+Each of the 32 layers creates 6 splits following an identical pattern:
+
+```
+Split N+0: Vulkan0 — Attention (device 0's head partition, ~8 heads)
+  FUSED_RMS_NORM(attn_norm) → MUL_MAT(Wq) → MUL_MAT(Wk) → MUL_MAT(Wv)
+  → ROPE(Q) → ROPE(K) → CPY(K→cache) → CPY(V→cache)
+  → FLASH_ATTN_EXT → MUL_MAT(Wo) → CPY(F32→F16 cast)
+
+Split N+1: Vulkan1 — Attention (device 1's head partition, ~24 heads)
+  FUSED_RMS_NORM(attn_norm) → MUL_MAT(Wq) → MUL_MAT(Wk) → MUL_MAT(Wv)
+  → ROPE(Q) → ROPE(K) → CPY(K→cache) → CPY(V→cache)
+  → FLASH_ATTN_EXT → MUL_MAT(Wo) → CPY(F32→F16 cast) → ADD(residual)
+
+Split N+2: Vulkan1 — REDUCE
+  REDUCE(device0_attn_partial, device1_attn_partial) → attn_combined
+
+Split N+3: Vulkan0 — FFN (device 0's column partition)
+  FUSED_RMS_NORM(ffn_norm) → FUSED_UP_GATE(up, gate) → MUL_MAT(down) → CPY(F32→F16)
+
+Split N+4: Vulkan1 — FFN (device 1's column partition)
+  FUSED_RMS_NORM(ffn_norm) → FUSED_UP_GATE(up, gate) → MUL_MAT(down)
+  → CPY(F32→F16) → ADD(residual)
+
+Split N+5: Vulkan1 — REDUCE
+  REDUCE(device0_ffn_partial, device1_ffn_partial) → l_out
+```
+
+### Complete Split Map
+
+```
+Split   0: CPU        GET_ROWS(token_embd)                 ← Embedding
+Split 1-6: Vk0+Vk1   Layer 0 (attn → REDUCE → ffn → REDUCE)
+Split 7-12:           Layer 1
+  ...
+Split 187-192:        Layer 31 (last layer)
+Split 192:            Also includes FUSED_RMS_NORM(output_norm) + MUL_MAT(lm_head)
+```
+
+Total: 1 (embedding) + 6×32 (layers) = 193 splits. The final output norm and lm_head are merged into the last REDUCE split on Vulkan1.
+
+### Key Observations
+
+1. **Weight partitioning**: The ~25/75% VRAM split means Vega handles fewer heads (8 of 32 attention heads, ~25% of FFN columns). The scheduler assigns proportionally.
+
+2. **REDUCE is always on Vulkan1**: Every REDUCE split runs on device 1 (6800 XT). Device 1 performs the residual ADD before REDUCE, so the result is a VIEW of device 1's partial sum + device 0's partial sum.
+
+3. **Redundant work**: Both devices independently compute `FUSED_RMS_NORM` on the same input (the previous layer's output). This is necessary because each device only has its own weight partition, but the norm input must be the full vector. The scheduler copies the REDUCE result to both devices.
+
+4. **CPY for type casting**: The `CPY` after `MUL_MAT(Wo)` and `MUL_MAT(down)` casts from F32 to F16 (`reduce_type = f16`), reducing cross-device transfer size by 2×.
+
+5. **No scheduler inputs after Split #2**: Splits 3-192 all show `# 0 inputs`, meaning the scheduler doesn't need to copy data between splits — the REDUCE op handles cross-device data flow directly.
