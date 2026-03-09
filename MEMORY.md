@@ -45,6 +45,13 @@
 - `ik_llama.cpp` — our fork with multi-GPU split mode
 - `llama.cpp` — upstream reference for nemotron_h_moe and other missing architectures
 
+## Vulkan REDUCE Op (2026-03-09)
+- REDUCE is a cross-device collective ADD used by split-mode graph (`-sm graph`). CUDA uses P2P `cudaMemcpyPeerAsync`; Vulkan has no P2P.
+- Implemented as CPU-mediated host staging: `ggml_vk_buffer_read` from each device → CPU ADD → `ggml_vk_buffer_write` back.
+- The scheduler's special REDUCE handling (identity tensor_id_copy, no n_inputs increment) was NOT changed — CUDA depends on it. Instead, REDUCE is handled entirely in the Vulkan backend.
+- `ggml_vk_reduce()` is called from `graph_compute` before the dryrun/build loop, since REDUCE splits are always single-node graphs.
+- Performance: CPU round-trip is slow for graph-split (193 splits, 6.5 tok/s). Layer-split (default, 3 splits, 18 tok/s) doesn't use REDUCE. Future: dmabuf GPU→GPU + ADD shader.
+
 ## Build Notes
 - Use clang (GCC 15 has -Wtemplate-body errors)
 - `-DGGML_IQK_FLASH_ATTENTION=OFF` on non-AVX2 hosts
