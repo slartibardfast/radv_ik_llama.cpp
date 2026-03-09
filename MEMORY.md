@@ -28,6 +28,12 @@
 - GGML_VK_VISIBLE_DEVICES=0 limits to single GPU (VEGA10) — avoids dual-GPU init overhead in tests.
 - 50/50 FUSED_UP_GATE tests pass, 1187/1187 standard backend-ops tests pass on RADV VEGA10.
 
+## Bug Fixes Found During Testing (2026-03-09)
+- **Empty-graph fence hang**: `graph_compute` set `compute_pending=true` unconditionally. Test framework sentinel nodes (GGML_OP_NONE) produce graphs with zero GPU submissions. Next `synchronize()` spins forever on unsignaled fence. Fix: guard with `submit_count > 0`.
+- **MULTI_ADD descriptor range**: `ggml_vk_op_f32` has an incontiguous-op block that overwrites `x_sz` with `ggml_nbytes(src0)`. For MULTI_ADD's strided view_2d, this gives only the view's logical size, not the full expert data span the shader reads. With `robustBufferAccess`, out-of-range reads silently return 0 — shader appeared to sum only expert 0. Fix: override x_sz *after* the incontiguous block.
+- **FUSED_UP_GATE M=1 NMSE instability**: Single-element output near zero produces huge NMSE from tiny absolute errors. Fixed by increasing K from 32 to 64 so the output has more signal.
+- Final test counts: 1190 standard + 143 FUSED_UP_GATE + 12 MULTI_ADD all pass on RADV VEGA10.
+
 ## Build Notes
 - Use clang (GCC 15 has -Wtemplate-body errors)
 - `-DGGML_IQK_FLASH_ATTENTION=OFF` on non-AVX2 hosts
