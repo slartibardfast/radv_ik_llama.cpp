@@ -1,3 +1,6 @@
 [submodule "ik_llama.cpp"]
 	path = ik_llama.cpp
 	url = https://github.com/slartibardfast/ik_llama.cpp
+[submodule "llama.cpp"]
+	path = llama.cpp
+	url = https://github.com/ggml-org/llama.cpp.git
