@@ -16,5 +16,6 @@
 - [Phase 13: Vulkan FUSED_UP_GATE Support](PHASE13.md)
 - [Phase 14: Vulkan Support for Qwen3.5 Recurrent Layers](PHASE14.md)
 - [Phase 15: Vulkan Support for GLM-4.7-Flash](PHASE15.md)
+- [Phase 16: Backend-Ops Testing and Bug Fixes](PHASE16.md)
 - [Benchmarks](BENCHMARKS.md)
 - [Memory](MEMORY.md)
