@@ -59,6 +59,16 @@
 - Can't bind dmabuf import buffer directly as storage buffer (only eTransferSrc|eTransferDst). Must copy to temp device-local buffer first.
 - Separate descriptor pool (1 set) for REDUCE's ADD dispatch avoids entangling with graph pipeline's descriptor management.
 
+## SUM_ROWS Bug (2026-03-10)
+- Three bugs: GPU descriptor range only covered ne00×ne01 (not all rows), shader had no bounds check for extra dispatch workgroups, CPU had `ne0` (=1) instead of `ne02` in row index calculation.
+- All fixed in one commit. SUM_ROWS now passes on both Vega and 6800 XT.
+
+## Vega 10 (GCN5) Optimization Research
+- No native DP4A — integer dot product emulation via float math (dequant+FMA at 4-8 cycles) outperforms "correct" integer emulation. The real gap vs DP4A hardware is 2-4× not 8×.
+- Unexploited: Vega's Rapid Packed Math (f16vec2 packed FP16 arithmetic). llama.cpp Vulkan shaders don't use RPM in fallback paths.
+- Optimization strategy: f16vec2 packed arithmetic + careful VGPR budgeting (≤32 regs for max occupancy) + full 64-lane wavefront subgroup reductions.
+- AMDVLK is extinct; RADV is the sole Vulkan driver for GCN. RADV continues improving but dedicated GCN shader optimization in inference frameworks is an unfilled niche.
+
 ## Build Notes
 - Use clang (GCC 15 has -Wtemplate-body errors)
 - `-DGGML_IQK_FLASH_ATTENTION=OFF` on non-AVX2 hosts
