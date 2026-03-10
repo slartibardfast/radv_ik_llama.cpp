@@ -4,93 +4,85 @@
 
 Replace the CPU-mediated REDUCE with a GPU-side implementation using dmabuf zero-copy and the existing ADD shader. Eliminate the CPU round-trip that makes graph-split mode slow.
 
-## Current State (Phase 17)
+## Before (Phase 17)
 
 Each REDUCE does 3 synchronous operations through the CPU:
 
 ```
-GPU A (Vega) ──read──> CPU ──add──> CPU ──write──> GPU B (6800 XT)
+GPU B: read local_partial → CPU       [fence wait]
+GPU A: read remote_partial → CPU      [fence wait]
+CPU: element-wise ADD
+GPU B: write result ← CPU             [fence wait]
 ```
 
-For Nemotron-Nano-4B: 64 REDUCE ops/token × 3 sync transfers each = **192 GPU↔CPU round-trips per token**. Result: 6.9 tok/s (vs 47 tok/s single-GPU).
+64 REDUCE ops/token × 3 fence waits = **192 GPU↔CPU round-trips per token**.
 
-## Target Architecture
+## After (Phase 18)
 
-Use dmabuf shared memory to keep everything on the GPU:
+dmabuf shared memory keeps everything on the GPU:
 
 ```
-GPU A: copy partial_sum → dmabuf_export_buffer     [GPU A transfer queue]
-GPU B: wait fence → copy dmabuf_import → local_tmp  [GPU B transfer queue]
-GPU B: ADD(local_partial, local_tmp) → result        [GPU B compute queue]
+GPU A: copy partial_sum → dmabuf_export_buffer     [fence wait]
+GPU B: copy dmabuf_import → local_tmp               ─┐
+GPU B: ADD(local_partial, local_tmp) → result        ─┘ [single fence wait]
 ```
 
-No CPU reads, no CPU writes, no CPU element-wise add.
+64 REDUCE ops/token × 2 fence waits = **128 GPU round-trips per token**. No CPU data movement.
 
-## Existing Infrastructure
+## Implementation
 
-All pieces already exist:
+### Changes to `ggml_vk_reduce()` in `ggml/src/ggml-vulkan.cpp`
 
-| Component | Location | Status |
-|---|---|---|
-| dmabuf export | `ggml_vk_create_dmabuf_exportable_buffer()` | Working (Phase 12) |
-| dmabuf import | `ggml_vk_import_dmabuf_buffer()` | Working (Phase 12) |
-| dmabuf staging cache | `ggml_vk_get_dmabuf_staging()` | Working — caches per device pair |
-| ADD shader | `vulkan-shaders/add.comp` | Working — F16/F32, broadcast support |
-| ADD pipeline | `pipeline_add[s0][s1][d]` | Working — 8 variants (F16/F32 combos) |
-| Fence sync | `dmabuf_shared_staging::fence` | Working — per-peer fence |
+**dmabuf fast path** (when both devices support dmabuf):
 
-## Implementation Plan
+1. Get/create dmabuf staging between src and dst devices (cached per device pair)
+2. GPU A: `vkCmdCopyBuffer` from src device-local → dmabuf export buffer, submit with fence
+3. Wait fence on src device
+4. GPU B: single command buffer that:
+   - Copies dmabuf import → `reduce_temp_buffer` (device-local, lazily allocated)
+   - Pipeline barrier (transfer → compute)
+   - Dispatches `add_norepeat` shader: `dst[i] = dst[i] + tmp[i]`
+5. Submit on compute queue, wait fence
 
-### Step 1: Rewrite `ggml_vk_reduce()` to use dmabuf + ADD shader
+**CPU fallback** (no dmabuf): same as Phase 17 implementation, restructured per-source.
 
-Replace the CPU-mediated loop with:
+### New device state
 
-1. For each remote source `src[j]` on a different device:
-   a. Get/create dmabuf staging between src device and dst device
-   b. Submit GPU copy: `src[j]` device-local → dmabuf export buffer (on src device)
-   c. Submit fence on src device
-   d. Wait fence on dst device
-   e. Submit GPU copy: dmabuf import buffer → temporary local buffer (on dst device)
-   f. Dispatch ADD shader: `result = result + tmp` (on dst device compute queue)
-
-2. Fall back to existing CPU path if dmabuf is unavailable (e.g. lavapipe, Windows).
-
-**Verify by**: graph-split inference produces same output, no crashes.
-
-### Step 2: Benchmark
-
-Compare before/after:
-
-| Mode | Before (CPU REDUCE) | Target |
-|---|---|---|
-| Graph-split gen tok/s | 6.9 | >15 |
-| Graph-split prompt tok/s | 9 | >30 |
-
-**Verify by**: `llama-cli -sm graph` benchmark numbers.
-
-### Step 3: Async pipelining (stretch)
-
-Overlap REDUCE transfers with subsequent GPU compute by using the async cross-device copy pipeline instead of synchronous fence waits. This requires integrating REDUCE into the `pending_xdev_copies` flow rather than handling it as an early return in `graph_compute`.
-
-**Verify by**: further benchmark improvement.
-
-## Key Design Decisions
-
-1. **ADD shader reuse**: The existing `add.comp` already handles F16×F16→F16 and F32×F32→F32 with proper stride support. No new shader needed.
-
-2. **Temporary buffer for imported data**: The dmabuf import buffer is shared staging — we can't dispatch ADD directly on it while the next REDUCE might reuse it. Copy to a local temp buffer first, then ADD.
-
-3. **Fallback**: Keep the CPU path for non-dmabuf systems. The dmabuf path is an optimization, not a requirement.
-
-4. **Two-GPU simplification**: With 2 GPUs, each REDUCE has exactly 1 remote source. The loop handles N sources but the common case is N=1.
-
-## Files to Modify
-
-| File | Change |
+| Field | Purpose |
 |---|---|
-| `ggml/src/ggml-vulkan.cpp` | Rewrite `ggml_vk_reduce()` — dmabuf copy + ADD shader dispatch |
+| `reduce_temp_buffer` | Device-local buffer for receiving dmabuf data |
+| `reduce_descriptor_pool` | Single-descriptor-set pool for ADD shader |
+| `reduce_descriptor_set` | Pre-allocated descriptor set, reused across REDUCE calls |
 
-## Risk
+### Key design decisions
 
-- **Fence overhead**: Each REDUCE still needs a fence wait (GPU A done → GPU B starts). With 64 REDUCEs per token, fence latency could dominate even without CPU copies.
-- **Mitigation**: If fence overhead is the bottleneck, Step 3 (async pipelining) batches the waits.
+1. **ADD shader reuse**: `add.comp` with `pipeline_add_norepeat[f16][f16][f16]` handles same-shape contiguous F16 ADD. No new shader needed.
+
+2. **In-place ADD**: Binding 0 (src0) and binding 2 (dst) point to the same buffer. The shader reads `data_a[idx]` before writing `data_d[idx]`, so in-place is safe.
+
+3. **Descriptor set management**: Separate pool (1 descriptor set) avoids entangling with the normal graph pipeline's descriptor allocation.
+
+4. **Temp buffer**: Can't dispatch ADD directly on the dmabuf import buffer — it lacks `eStorageBuffer` usage flag (only `eTransferSrc | eTransferDst`). Copy to a regular device-local temp buffer first.
+
+## Results
+
+Nemotron-Nano-4B-Q4_K_M, Vega + 6800 XT, `-c 2048`, 18-token prompt + 49 generated:
+
+| Mode | Prompt (tok/s) | Gen (tok/s) |
+|---|---|---|
+| Single GPU (6800 XT) | 291 | 48.4 |
+| Layer split (`-sm layer`) | 137 | 18.5 |
+| **Graph split, dmabuf REDUCE** | **47.5** | **7.8** |
+| Graph split, CPU REDUCE (before) | 9 | 6.5 |
+
+### Analysis
+
+- **Prompt eval 5.3× faster** (9 → 47.5 tok/s): CPU element-wise ADD on multi-token batches was the dominant bottleneck.
+- **Token gen +20%** (6.5 → 7.8 tok/s): Modest gain because the per-token REDUCE data is small (6KB F16) — fence latency dominates, not data movement.
+- **Remaining gap**: Graph split is still 2.4× slower than layer split for token gen. The 128 fence waits per token (2 per REDUCE × 64 REDUCEs) cost ~20-50μs each ≈ 2.5-6.4ms overhead per token. The rest is actual GPU compute overhead from 193 splits.
+
+## Future Optimization
+
+- **Async pipelining (Step 3)**: Overlap REDUCE transfers with subsequent GPU compute. Would require integrating REDUCE into the `pending_xdev_copies` flow instead of synchronous fence waits.
+- **Batched fence waits**: Coalesce multiple REDUCE fence waits where possible.
+- Graph split mode is primarily useful for models that don't fit on one GPU — for models that fit, layer split is always faster.
