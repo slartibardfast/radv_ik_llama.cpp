@@ -52,6 +52,13 @@
 - `ggml_vk_reduce()` is called from `graph_compute` before the dryrun/build loop, since REDUCE splits are always single-node graphs.
 - Performance: CPU round-trip is slow for graph-split (193 splits, 6.5 tok/s). Layer-split (default, 3 splits, 18 tok/s) doesn't use REDUCE. Future: dmabuf GPU→GPU + ADD shader.
 
+## Phase 18: dmabuf REDUCE (2026-03-10)
+- Replaced CPU-mediated REDUCE with dmabuf GPU-to-GPU copy + ADD shader dispatch on destination device.
+- Graph-split prompt eval: 9→47 tok/s (5.3×). Token gen: 6.5→7.8 tok/s (+20%).
+- Token gen improvement modest because per-REDUCE data is small (6KB F16) — fence latency dominates, not bandwidth.
+- Can't bind dmabuf import buffer directly as storage buffer (only eTransferSrc|eTransferDst). Must copy to temp device-local buffer first.
+- Separate descriptor pool (1 set) for REDUCE's ADD dispatch avoids entangling with graph pipeline's descriptor management.
+
 ## Build Notes
 - Use clang (GCC 15 has -Wtemplate-body errors)
 - `-DGGML_IQK_FLASH_ATTENTION=OFF` on non-AVX2 hosts
