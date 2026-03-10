@@ -96,6 +96,27 @@ Fixes:
 - Pass `nrows` via `KY` push constant, add `if (row >= p.KY) return;` in shader
 - Change `ne0` → `ne02` in CPU `ggml_compute_forward_sum_rows_f32`
 
+## Verification: Full Backend-Ops Suite (Post-Fix)
+
+Ran complete backend-ops suite on both GPUs after all Phase 18 changes (dmabuf REDUCE + SUM_ROWS fix):
+
+| GPU | Pass | Fail | SUM_ROWS |
+|---|---|---|---|
+| Vega (GCN5, wave64) | 901 | 9 | **PASS** |
+| 6800 XT (RDNA2, wave32) | 901 | 9 | **PASS** |
+
+All 9 failures per device are pre-existing (CPY iq4_nl, MUL_MAT q4_K×f16/iq4_xs/bf16, MUL_MAT_ID iq4_xs). No regressions introduced.
+
+### Multi-GPU Inference Verification
+
+| Mode | Output | Performance |
+|---|---|---|
+| Single GPU (6800 XT) | Correct (temp=0) | 48 tok/s gen |
+| Layer split | Correct (matches single GPU) | 18 tok/s gen |
+| Graph split (dmabuf REDUCE) | Runs, wrong output (temp=0) | 7.7 tok/s gen, 41 tok/s prompt |
+
+Graph-split correctness issue is pre-existing (Phase 19). Both CPU and dmabuf REDUCE paths produce identical output, confirming REDUCE implementation is correct and the bug is in the scheduler/weight partitioning.
+
 ## Future Optimization
 
 - **Async pipelining (Step 3)**: Overlap REDUCE transfers with subsequent GPU compute. Would require integrating REDUCE into the `pending_xdev_copies` flow instead of synchronous fence waits.
