@@ -1,6 +1,7 @@
 # Summary
 
 - [Plan](PLAN.md)
+- [Phase 0: Backend-Ops Test Failure Fixes](PHASE0.md)
 - [Phase 1: Async Interface and Events](PHASE1.md)
 - [Phase 2: Vulkan Split Buffer Type](PHASE2.md)
 - [Phase 3: Cross-Device Copies via Host Staging](PHASE3.md)
@@ -22,6 +23,5 @@
 - [Phase 19: Graph-Split Correctness](PHASE19.md)
 - [Phase 20: Vega Rapid Packed Math Optimization](PHASE20.md)
 - [Phase 21: nemotron_h_moe Architecture Support](PHASE21.md)
-- [Phase 22: Backend-Ops Test Failure Fixes](PHASE22.md)
 - [Benchmarks](BENCHMARKS.md)
 - [Memory](MEMORY.md)
