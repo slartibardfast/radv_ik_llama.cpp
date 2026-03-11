@@ -23,5 +23,6 @@
 - [Phase 19: Graph-Split Correctness](PHASE19.md)
 - [Phase 20: Vega Rapid Packed Math Optimization](PHASE20.md)
 - [Phase 21: nemotron_h_moe Architecture Support](PHASE21.md)
+- [Phase 22: Fix get_tensor_async Race on rBAR Devices](PHASE22.md)
 - [Benchmarks](BENCHMARKS.md)
 - [Memory](MEMORY.md)
