@@ -75,6 +75,14 @@
 - This single fix resolved all 10 test-backend-ops failures: 4 direct (q4_K×f16 batched) + 6 indirect (prealloc buffer contamination causing flaky bf16, iq4_xs, iq3_xxs, CPY failures).
 - Key insight: "flaky" test failures in GPU backends can be prealloc buffer contamination from a completely different operation's bug.
 
+## Vega Inference Bug: get_tensor_async Race Condition (2026-03-11)
+- **Root cause**: `get_tensor_async` calls `buffer_read_2d_async` which does a synchronous memcpy from host-visible (rBAR) GPU buffer. But `get_tensor_async` is called BEFORE `synchronize()`, so GPU compute may still be in flight. On Vega (slower), the CPU reads stale data; on 6800 XT (faster), the GPU usually finishes in time — pure timing-dependent race.
+- **Symptoms**: garbage output when ngl > n_layers (output matmul on GPU). ngl <= n_layers works (output stays on CPU). All backend-ops tests pass (they use synchronous reads).
+- **Misleading clue**: inserting submit+fence_wait mid-graph "fixed" the issue — this forced the compute to complete before the next `get_tensor_async` read.
+- **Fix**: for host-visible non-UMA buffers, `get_tensor_async` records a deferred memcpy in `ctx->pending_host_memcpys` (new field on backend context) instead of copying immediately. `synchronize()` processes these after `sync_compute` waits for the compute fence.
+- **Why transfer_ctx->out_memcpys didn't work**: `graph_cleanup` in `sync_compute` clears `gc.contexts`, destroying the transfer context. The weak_ptr `ctx->transfer_ctx` expires, so `synchronize()` exits early without processing `out_memcpys`.
+- **Key insight**: `buffer_read` (synchronous) checks `eHostVisible && uma` before direct memcpy, but `buffer_read_2d_async` only checked `eHostVisible`. The UMA check prevented the issue on UMA devices where compute and host share coherent memory. For discrete GPUs with rBAR, the async path was broken.
+
 ## Build Notes
 - Use clang (GCC 15 has -Wtemplate-body errors)
 - `-DGGML_IQK_FLASH_ATTENTION=OFF` on non-AVX2 hosts
