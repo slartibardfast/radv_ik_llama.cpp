@@ -98,6 +98,14 @@
 - Key remaining upstream differences: (1) iq4_xs dequantize4 reads individual bytes vs upstream's packed32+unpack8, (2) no data_a_packed32/v4/packed16 buffer aliases, (3) bf16 k=1 passes alone but fails in full suite despite using own buffer (not prealloc).
 - Build system caveat: changing vulkan-shaders-gen.cpp does NOT auto-trigger shader regen. Must manually rm -rf build/ggml/src/vulkan-shaders-gen-prefix, rebuild tool, then re-run it.
 
+## Phase 0 Round 4: bf16 k=1 Was a CPU Bug, Not GPU (2026-03-13)
+- **Critical lesson**: bf16 MUL_MAT k=1 (NMSE=2.88) was NOT a GPU bug. The GPU produced correct output. The CPU reference (IQK) produced garbage because `iqk_set_kernels_float` requires `ne00 % 32 == 0` for bf16 — k=1 fails this check, IQK returns false, fallback also broken.
+- **Fix**: Added scalar bf16 mul_mat fallback in IQK for `ne00 < k_step`. Three-tier dispatch: AVX512BF16 (ne00%32), generic SIMD (ne00%k_step), scalar (any ne00).
+- **Methodology that found it**: Wrote minimal standalone test printing GPU vs CPU values side-by-side. GPU: correct. CPU: all zeros. Took 10 minutes.
+- **Methodology that failed**: 6+ hours exhaustively comparing GPU dispatch code, push constants, SPIR-V bytecode, spec constants vs upstream. Everything matched. The bug wasn't there.
+- **Rule**: ALWAYS verify CPU reference output before debugging GPU. Large NMSE (>1.0) is a red flag for CPU reference bugs, not GPU bugs. Edge-case dimensions (k=1) break CPU alignment assumptions.
+- Remaining 4 failures: iq4_xs MUL_MAT, iq3_xxs MUL_MAT (marginal), iq4_xs MUL_MAT_ID, 2x CPY f32→iq4_nl.
+
 ## Build Notes
 - Use clang (GCC 15 has -Wtemplate-body errors)
 - `-DGGML_IQK_FLASH_ATTENTION=OFF` on non-AVX2 hosts
