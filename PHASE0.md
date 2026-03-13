@@ -1,10 +1,10 @@
 # Phase 0: Backend-Ops Test Failure Fixes
 
-## Status: IN PROGRESS (2 MUL_MAT + 1 MUL_MAT_ID + 2 CPY failures remaining)
+## Status: IN PROGRESS (1 MUL_MAT_ID + 2 CPY failures remaining)
 
 ## Overview
 
-Fix all backend-ops test failures on RADV Vulkan (Vega 56 / RX 6800 XT). Originally 10 failures; 6 now fixed (4 by K-quant dequant, 1 by push constant alignment, 1 by IQK bf16 scalar fallback), 4 remain (+1 marginal iq3_xxs).
+Fix all backend-ops test failures on RADV Vulkan (Vega 56 / RX 6800 XT). Originally 10 failures; 8 now fixed (4 by K-quant dequant, 1 by push constant alignment, 1 by IQK bf16 scalar fallback, 2 by IQK iq4_xs scalar fallback), 3 remain.
 
 ## Round 1: K-Quant Dequant Bounds Bug (2026-03-11)
 
@@ -66,18 +66,26 @@ Files changed:
 
 Files changed: `ggml/src/iqk/iqk_gemm_floats.cpp`
 
-## Remaining Failures (4)
+## Round 5: IQK CPU iq4_xs Scalar Fallback (2026-03-13)
+
+**Root cause**: iq4_xs MUL_MAT was NOT a GPU bug. GPU output matched float64 expected at machine epsilon (NMSE ~1.8e-14). The CPU reference (IQK) had a systematic computation error (NMSE ~0.027) in its AVX2 SIMD kernel `DequantizerIQ4XS`. The IQK kernel uses unsigned lookup values (+128 offset) with `_mm256_maddubs_epi16` and a bias correction via `accum_mins(-128*d)`. The complex SIMD scale/bias compensation has a subtle error on non-AVX512 systems.
+
+**Discovery method**: Same minimal-test methodology as Round 4. Wrote standalone test that computed expected values via dequant+float64 dot product, then compared GPU and CPU separately. GPU matched perfectly; CPU was systematically off.
+
+**Fix**: Added `mul_mat_iq4_xs_q8_K_scalar<nrc_y>()` — a scalar iq4_xs×Q8_K dot product using signed `kvalues_iq4nl` values directly (matching upstream's `ggml_vec_dot_iq4_xs_q8_K` approach). Used when HAVE_FANCY_SIMD is not defined. CPU NMSE dropped from 0.027 to 2.97e-05. Both iq4_xs MUL_MAT and iq3_xxs MUL_MAT now pass (iq4_xs MUL_MAT_ID also fixed since same kernel).
+
+Files changed: `ggml/src/iqk/iqk_gemm_kquants.cpp`
+
+## Remaining Failures (3)
 
 | # | Test | NMSE | Threshold | Notes |
 |---|------|------|-----------|-------|
-| 1 | MUL_MAT(iq4_xs x f32, m=16,n=1,k=256) | 0.012-0.040 | 0.0005 | Variable |
-| 2 | MUL_MAT(iq3_xxs x f32, m=16,n=1,k=256) | 0.00065 | 0.0005 | Marginal |
-| 3 | MUL_MAT_ID(iq4_xs x f32, n_mats=4,n_used=2,m=512,n=1,k=256) | 0.025-0.033 | 0.0005 | Variable |
-| 4-5 | CPY(f32→iq4_nl) × 2 | 0.0012-0.0014 | 0.000001 | |
+| 1 | MUL_MAT_ID(iq3_xxs, n_mats=4,n_used=2,m=512,n=1,k=256) | 0.00064 | 0.0005 | Marginal |
+| 2-3 | CPY(f32→iq4_nl) × 2 | 0.0011-0.0013 | 0.000001 | |
 
 ## Remaining Differences from Upstream
 
-1. **iq4_xs dequantize4**: Fork reads 4 individual bytes (`data_a[...].qs[iq+0..3]`); upstream reads packed 32-bit word (`data_a_packed32[...].qs[iq/4]` + `unpack8`). Fork lacks `data_a_packed32` buffer alias.
+1. **iq4_xs dequantize4**: Fork reads 4 individual bytes (`data_a[...].qs[iq+0..3]`); upstream reads packed 32-bit word (`data_a_packed32[...].qs[iq/4]` + `unpack8`). Fork lacks `data_a_packed32` buffer alias. NOTE: Verified mathematically equivalent — this is NOT a bug.
 
 2. **No A-buffer type aliases**: Fork's `mul_mat_vec_base.comp` only declares `data_a[]`. Upstream's `mul_mat_vec_iface.glsl` also declares `data_a_v4[]`, `data_a_packed16[]`, `data_a_packed32[]` aliases at binding 0.
 
