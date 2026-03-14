@@ -1,5 +1,23 @@
 # Benchmark Expectations (sanity check reference)
 
+## Build Status
+
+| Binary | Target | Path | JIT Status |
+|--------|--------|------|------------|
+| Fork Vulkan | RADV (both GPUs) | `ik_llama.cpp/build/bin/llama-cli` | Ready (no JIT needed) |
+| ROCm 6800 XT | gfx1030 only | `llama.cpp/build-hip-navi/bin/llama-cli` | Ready (JIT cached) |
+| ROCm Vega | gfx900 only | `llama.cpp/build-hip-vega/bin/llama-cli` | Ready (JIT cached after ~9h first run) |
+| ROCm dual | gfx900+gfx1030 | `llama.cpp/build-hip/bin/llama-cli` | 6800 XT cached, Vega JIT in progress |
+
+### ROCm JIT compilation notes
+
+HIP/ROCm compiles GPU kernels on first invocation. This is a one-time cost per binary+target combination:
+- gfx1030 (RDNA 2): ~20-30 minutes first run
+- gfx900 (GCN 5): ~9 hours first run (pathologically slow)
+- Kernel cache persists between runs of the same binary
+- Cache does NOT transfer between different binaries (single-target vs dual-target)
+- Dual-target builds (`gfx900;gfx1030`) JIT both targets even when only one GPU is visible
+
 ## Hardware bandwidth limits
 
 | GPU | Bandwidth | Compute | VRAM |
