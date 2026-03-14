@@ -1,6 +1,9 @@
 # Summary
 
 - [Plan](PLAN.md)
+
+# Phases
+
 - [Phase 0: Backend-Ops Test Failure Fixes](PHASE0.md)
 - [Phase 1: Async Interface and Events](PHASE1.md)
 - [Phase 2: Vulkan Split Buffer Type](PHASE2.md)
@@ -24,5 +27,12 @@
 - [Phase 20: Vega Rapid Packed Math Optimization](PHASE20.md)
 - [Phase 21: nemotron_h_moe Architecture Support](PHASE21.md)
 - [Phase 22: Fix get_tensor_async Race on rBAR Devices](PHASE22.md)
+
+# Performance
+
+- [Benchmark Expectations](BENCHMARK_EXPECTATIONS.md)
 - [Benchmarks](BENCHMARKS.md)
+
+# Reference
+
 - [Memory](MEMORY.md)

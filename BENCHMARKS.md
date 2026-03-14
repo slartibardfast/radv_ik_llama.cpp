@@ -53,6 +53,11 @@ Graph splits > ~5 on single GPU indicates ops falling back to CPU — a performa
 
 ## Results
 
+> **Note**: All System B results below were gathered BEFORE Phase 0 bug fixes
+> (IQK scalar fallbacks, push constant alignment). These numbers are preserved
+> for historical reference but must be re-measured. System A results (Polaris 12)
+> are unaffected by Phase 0 changes.
+
 ### System A: Retro Baseline (Polaris 12 + lavapipe)
 
 #### Phase Evolution (multi-GPU, 2 token prompt, 4 eval tokens)
