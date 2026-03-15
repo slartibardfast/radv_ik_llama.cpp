@@ -78,8 +78,49 @@ No improvement because lavapipe's "uploads" are instant memcpy. Benefit requires
 
 ### System B: Real Multi-GPU (RX 6800 XT + Vega)
 
-> Results pending re-measurement after Phase 0 bug fixes.
-> Pre-Phase 0 data available in git history at commit `c97afb6`.
+Post-Phase 0 measurements. Vulkan fork (ik_llama.cpp) only — ROCm/HIP benchmarks abandoned due to pathological JIT compilation times (9+ hours per model/prompt shape on gfx900/gfx1030).
+
+#### Perplexity (wikitext-2-raw, n_ctx=512, 6800 XT)
+
+| Model | PPL | Expected | Status |
+|-------|-----|----------|--------|
+| TinyLlama 1.1B Q2_K | 23.99 ± 0.20 | ~20-25 | OK |
+| Llama-2-7B Q8_0 | 5.80 ± 0.03 | ~5.5-5.8 | OK |
+| Llama-2-13B Q8_0 | 5.12 ± 0.03 | ~4.9-5.2 | OK |
+
+Perplexity matches published reference values, confirming the Vulkan backend produces correct results after Phase 0 fixes.
+
+#### TinyLlama 1.1B Q2_K (127 token prompt, 3 eval tokens, best of 3)
+
+| Configuration | Prompt eval | Token gen | Load time |
+|--------------|------------|-----------|-----------|
+| RX 6800 XT alone | 56 ms (2259 tok/s) | 16.13 ms/tok (62 tok/s) | 164 ms |
+| Vega alone | 83 ms (1528 tok/s) | 32.74 ms/tok (30.5 tok/s) | 408 ms |
+| Both GPUs (smgs 1:1) | 151 ms (842 tok/s) | 36.22 ms/tok (27.6 tok/s) | 289 ms |
+
+#### Llama-2-7B Q8_0 (127 token prompt, 3 eval tokens, best of 3)
+
+| Configuration | Prompt eval | Token gen | Load time |
+|--------------|------------|-----------|-----------|
+| RX 6800 XT alone | 156 ms (812 tok/s) | 31.99 ms/tok (31.3 tok/s) | 2071 ms |
+| Vega alone | 363 ms (350 tok/s) | 125.97 ms/tok (7.9 tok/s) | 6930 ms |
+| Both GPUs (smgs 1:1) | 399 ms (319 tok/s) | 73.50 ms/tok (13.6 tok/s) | 3795 ms |
+
+#### Llama-2-13B Q8_0 (127 token prompt, 3 eval tokens, best of 3)
+
+| Configuration | Prompt eval | Token gen | Load time |
+|--------------|------------|-----------|-----------|
+| RX 6800 XT alone | 273 ms (465 tok/s) | 53.47 ms/tok (18.7 tok/s) | 4105 ms |
+| Both GPUs (smgs 1:1) | 646 ms (197 tok/s) | 156.35 ms/tok (6.4 tok/s) | 8348 ms |
+| Both GPUs (smgs 2:1) | 2328 ms (55 tok/s) | 1103.83 ms/tok (0.9 tok/s) | 12109 ms |
+
+#### Notes
+
+Token generation rates are lower than pre-Phase 0 measurements (which were gathered with IQK CPU bugs present). The pre-Phase 0 test framework compared GPU output against incorrect CPU reference values — the "passing" benchmarks may have been running with different code paths or masking performance issues.
+
+The smgs 2:1 configuration for 13B shows catastrophic performance (0.9 tok/s). This needs investigation — the asymmetric split may be triggering a pathological dispatch pattern.
+
+Vega token generation is significantly slower than 6800 XT (30.5 vs 62 tok/s for TinyLlama, 7.9 vs 31.3 for 7B). This exceeds the expected ~1.3-1.8x ratio from hardware specs, suggesting Vega-specific shader performance issues worth investigating (see Phase 20: Vega RPM optimization).
 
 ## Runtime Flags
 
