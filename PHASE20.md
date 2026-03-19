@@ -1,87 +1,166 @@
 # Phase 20: Vulkan Token Generation Performance
 
-## Status: IN PROGRESS
+## Status: IN PROGRESS — subgroup reduction complete, MMVQ port next
 
 ## Problem
 
-Vulkan token generation is 2-6x slower than ROCm on identical hardware, leaving most memory bandwidth unused.
+Vulkan token generation is 2-6x slower than ROCm on identical hardware.
 
-### Measured bandwidth utilization (6800 XT, 512 GB/s peak)
+### Measured performance (6800 XT, 512 GB/s peak)
 
-| Model | Theoretical | ROCm tok/s | Vulkan tok/s | ROCm BW% | Vulkan BW% |
-|-------|------------|-----------|-------------|----------|------------|
-| TinyLlama 1.1B Q2_K | 1305 | 380 | 62 | 29% | 4.8% |
-| Llama-2-7B Q8_0 | 73 | 69 | 31 | 95% | 42% |
+| Model | ROCm tok/s | Vulkan tok/s | BW utilization | Gap |
+|-------|-----------|-------------|----------------|-----|
+| TinyLlama 1.1B Q2_K | 380 | 62 | 4.8% | 6.1x |
+| Llama-2-7B Q8_0 | 69 | 31 | 42% | 2.2x |
 
-ROCm achieves near-perfect bandwidth utilization on 7B (95%). Vulkan achieves 42% — a **2.3x gap** on large models. On small models the gap widens to 6x due to dispatch overhead.
+### Measured performance (Vega, 484 GB/s HBM2 peak)
 
-### Vega (484 GB/s HBM2 peak)
-
-| Model | ROCm tok/s | Vulkan tok/s | ROCm advantage |
-|-------|-----------|-------------|----------------|
+| Model | ROCm tok/s | Vulkan tok/s | Gap |
+|-------|-----------|-------------|-----|
 | TinyLlama 1.1B Q2_K | 244 | 31 | 7.9x |
-| Llama-2-7B Q8_0 | — (OOM) | 8 | — |
 
-Vega's Vulkan performance is worse than 6800 XT relative to ROCm, suggesting additional GCN5-specific shader issues.
+## Root Cause: Missing MMVQ (Integer Dot Product) Path
 
-## Root Cause Analysis
+Upstream llama.cpp Vulkan has two mul_mat_vec strategies:
 
-### Large models (7B+): shader memory access inefficiency
+1. **Dequant path** (what the fork uses): dequantize weights → F32, load F32 activations, FMA accumulate
+2. **MMVQ path** (missing from fork): load quantized weights directly, quantize activations to Q8_1, use `dotPacked4x8EXT` (DP4A) for 4×int8 per instruction
 
-The `mul_mat_vec` kernel achieves 42% bandwidth on 6800 XT. The `test-backend-ops perf` micro-benchmark shows the kernel DOES saturate bandwidth on large matrices:
+The MMVQ path reads ~8× less data per element and uses ~4× fewer instructions. On AMD with k≥2048, upstream selects MMVQ for all K-quant types. The 6800 XT supports `VK_KHR_shader_integer_dot_product` (`int dot: 1`).
 
+### Why the dequant path is slow
+
+For Llama-2-7B Q8_0 token generation:
+- Total weight reads per token: 7.02 GB
+- At 512 GB/s: 13.7 ms theoretical minimum
+- ROCm achieves 14.5 ms (95% bandwidth utilization)
+- Vulkan dequant path achieves 32.3 ms (42% utilization)
+
+The dequant path wastes bandwidth by expanding quantized weights to F32 in shader registers before multiply-accumulate. MMVQ keeps data in int8 throughout, reading less from memory and using the dedicated DP4A hardware.
+
+### Why small models are even worse
+
+TinyLlama (459 MiB Q2_K) has small weight matrices (~1.4 MB per 2048×2048). Each dispatch can't amortize Vulkan's ~3-5 µs per-dispatch overhead. With 511 graph nodes per token, dispatch overhead consumes ~2 ms of the 16 ms total. ROCm's HIP has ~10× lower dispatch overhead.
+
+## Implementation Plan
+
+### Step 1: MMVQ Shaders (for RDNA2 and other DP4A hardware)
+
+Port upstream's MMVQ shader infrastructure:
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `mul_mat_vecq.comp` | ~143 | Main MMVQ shader — loads Q8_1 B data, calls `mmvq_dot_product` |
+| `mul_mat_vecq_funcs.glsl` → `.comp` | ~494 | Per-type `repack()` and `mmvq_dot_product()` using `dotPacked4x8EXT` |
+
+Key functions per quant type:
+- `repack(ib, iqs)` — load quantized A weights, rearrange for DP4A alignment
+- `mmvq_dot_product(ib, iqs)` — `dotPacked4x8EXT(a_packed, b_packed)` + scale correction
+- `get_dm(ib)` / `get_d(ib)` — load per-block scale factors
+
+Types to implement (matching upstream AMD heuristic):
+- Q4_0, Q4_1, Q5_0, Q5_1, Q8_0 (legacy quants)
+- Q2_K, Q3_K, Q4_K, Q5_K (K-quants, k≥2048)
+- IQ types where applicable
+
+### Step 2: Q8_1 Quantization Pipeline
+
+Add GPU-side F32 → Q8_1 quantization:
+- `quantize_q8_1.comp` shader (upstream already has this)
+- Pipeline creation and pre-allocated Q8_1 buffer
+- Dispatch Q8_1 quantization before MMVQ mul_mat_vec
+
+### Step 3: C++ Dispatch Logic
+
+Port upstream's `quantize_y` decision:
 ```
-q8_0, m=128256, n=1, k=3072: 2159 GB/s effective (saturated)
-q8_0, m=16,     n=1, k=256:     9 GB/s effective (dispatch-bound)
+quantize_y = device->integer_dot_product
+          && src1->type == GGML_TYPE_F32
+          && ggml_is_contiguous(src1)
+          && (ne11 * ne10) % 4 == 0
+          && ggml_vk_should_use_mmvq(device, ne01, ne11, ne10, src0->type)
 ```
 
-But during real inference, the actual weight matrices are moderate-sized (4096×4096 for 7B). At these sizes the kernel doesn't fully saturate bandwidth — memory access patterns, workgroup sizing, or reduction strategy may be suboptimal.
+AMD heuristic from upstream:
+- Use MMVQ when k ≥ 2048 for most types
+- Q8_0: use MMVQ only on GCN (Vega), not on RDNA2
+- Q3_K, Q6_K: skip MMVQ (2-byte alignment issues)
 
-### Small models (<2B): dispatch overhead dominates
+### Step 4: Pipeline Array Extension
 
-TinyLlama has 511 graph nodes per token. At 62 tok/s, each token takes 16 ms = **31 µs per node average**. With Vulkan dispatch overhead of ~3-5 µs per `vkCmdDispatch`, dispatch alone consumes ~2 ms (12%). But the bigger issue is that small weight matrices (2048×2048, ~1.4 MB for Q2_K) take only 2.7 µs to read at peak bandwidth — the kernel can't amortize launch overhead at this size.
+Add `pipeline_dequant_mul_mat_vec_q8_1_f32[type][cols]` array alongside existing `_f32_f32` and `_f16_f32` arrays.
 
-ROCm's HIP has ~10x lower dispatch overhead than Vulkan's command buffer model, explaining the 6x gap on small models.
+### Step 5: Vega (GCN5) — Packed FP16 Path
 
-## Optimization Targets
+Vega has NO DP4A hardware (`int dot: 0`). The MMVQ path won't help Vega. Instead, exploit Vega-specific features:
 
-### 1. mul_mat_vec memory coalescing (high impact, large models)
+**Rapid Packed Math (RPM):**
+- Vega processes two FP16 values per instruction via `f16vec2` (`v_pk_*` ISA)
+- Current dequant path works in F32 — switching to FP16 packed math doubles throughput
+- Requires `VK_KHR_shader_float16_int8` (supported on RADV)
 
-Current shader may have suboptimal memory access patterns for the A matrix (quantized weights). Ensuring coalesced reads across the workgroup could close the 42% → 90%+ gap.
+**Implementation:**
+- New `mul_mat_vec_f16pack.comp` variant that:
+  - Dequantizes to `float16_t` instead of `float`
+  - Accumulates using `f16vec2` packed operations
+  - Uses `float` only for the final reduction (avoid precision loss)
+- Selected when `!integer_dot_product && fp16` (Vega, Polaris)
 
-### 2. Workgroup size tuning (medium impact, all models)
+**VGPR Budgeting:**
+- GCN5 has 256 VGPRs per SIMD unit
+- Target ≤32 VGPRs per thread for maximum occupancy (8 wavefronts/SIMD)
+- f16vec2 halves register pressure vs F32 — more accumulators fit in 32 regs
 
-The fork uses a fixed workgroup size. Upstream llama.cpp has a 3D pipeline array `[DMMV_WG_SIZE_COUNT][type][cols]` that selects workgroup sizes based on matrix dimensions. Porting this heuristic could improve efficiency.
+**Wave64 Exploitation:**
+- Vega's native wavefront is 64 lanes
+- Each subgroupAdd covers 64 elements — 2× the work per reduction vs RDNA2's wave32
+- Shader should be tuned for 64-wide access patterns (coalesced 64×4B = 256B cache lines)
 
-### 3. Kernel fusion (high impact, small models)
+### Step 6: Benchmark and Tune
 
-Fusing consecutive small ops (e.g., RMS_NORM + MUL_MAT, or MUL + ADD) reduces dispatch count. The fork already has FUSED_UP_GATE (Phase 13). Additional fusion targets:
-- FUSED_RMS_NORM + MUL_MAT (norm then project)
-- Fused QKV projection (single dispatch for Q, K, V)
+For each GPU × quant type combination:
+1. Measure tok/s and bandwidth utilization
+2. Compare against ROCm baseline
+3. Tune NUM_ROWS, BLOCK_SIZE, and K_PER_ITER for optimal occupancy
 
-### 4. Vega-specific: Rapid Packed Math (medium impact, Vega only)
+Target: exceed ROCm on 7B Q8_0 token gen (>69 tok/s on 6800 XT) by combining DP4A efficiency with Vulkan's lower memory overhead.
 
-Vega's RPM processes two FP16 values per instruction via `f16vec2`. The mul_mat_vec dequant path currently works in F32. Using F16 packed math could improve Vega throughput — but this is secondary to the memory access fixes that benefit all GPUs.
+## Completed Work
 
-### 5. Async command buffer submission (medium impact, all)
+### Subgroup Reduction (done, marginal impact)
 
-Vulkan allows pre-recording command buffers. If the current implementation records and submits per-dispatch, batching into a single command buffer per token could eliminate most dispatch overhead.
+Added `subgroupAdd` reduction variants to mul_mat_vec shaders, replacing shared memory tree reduction. Requires `require_full_subgroups=true` + `required_subgroup_size`. Correctness verified (926/926 tests pass). Performance impact negligible — the reduction step is not the bottleneck.
 
-## Approach
+### Bandwidth Analysis (done)
 
-1. Profile mul_mat_vec with `VK_EXT_calibrated_timestamps` or radv perf counters to identify the bottleneck (ALU-bound vs memory-bound vs launch-bound)
-2. Compare workgroup/dispatch parameters with upstream
-3. Implement workgroup size heuristic from upstream
-4. Measure impact on 7B token gen
-5. If still >2x gap, investigate memory access patterns in the shader
+Profiled mul_mat_vec with test-backend-ops perf:
+- Large matrices (m=128K, k=3K): kernel saturates bandwidth (~2100 GB/s effective)
+- Realistic matrices (m=4K, k=4K): ~42% bandwidth on 6800 XT
+- Small matrices (m=16, k=256): dispatch-overhead dominated (~9 GB/s)
+
+## Architecture-Specific Strategy Summary
+
+| GPU | Architecture | DP4A | Strategy | Expected Improvement |
+|-----|-------------|------|----------|---------------------|
+| RX 6800 XT | RDNA2 | Yes | MMVQ (dotPacked4x8EXT) | 2-3× (close to ROCm) |
+| RX Vega | GCN5 | No | Packed FP16 (f16vec2 RPM) | 1.5-2× |
+| Polaris | GCN4 | No | Packed FP16 (limited RPM) | 1.2-1.5× |
+| NVIDIA | Turing+ | Yes | MMVQ (existing upstream) | Already optimized |
 
 ## Verify by
 
-Vulkan 7B Q8_0 token gen on 6800 XT improves from 31 tok/s toward 60+ tok/s (>80% bandwidth utilization).
+- 7B Q8_0 token gen on 6800 XT: >60 tok/s (from 31, target exceeding ROCm's 69)
+- TinyLlama Q2_K on 6800 XT: >150 tok/s (from 62)
+- TinyLlama Q2_K on Vega: >60 tok/s (from 31, via FP16 path)
+- 926/926 backend-ops tests pass on both GPUs
+- Perplexity unchanged (no precision regression)
 
 ## References
 
-- Benchmark data: [BENCHMARKS.md](BENCHMARKS.md)
-- Upstream workgroup heuristic: `llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp` line ~3978 (3D pipeline array)
+- Upstream MMVQ: `llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq.comp`
+- Upstream MMVQ funcs: `llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq_funcs.glsl`
+- Upstream quantize_y: `llama.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp` line ~7647
+- Upstream should_use_mmvq: same file, search `ggml_vk_should_use_mmvq`
 - AMD GCN5 ISA: Rapid Packed Math `v_pk_*` instructions
-- RADV: `VK_KHR_shader_float16_int8` for `float16_t` / `f16vec2`
+- Vulkan DP4A: `VK_KHR_shader_integer_dot_product` / `dotPacked4x8EXT`
+- Benchmark data: [BENCHMARKS.md](BENCHMARKS.md)
