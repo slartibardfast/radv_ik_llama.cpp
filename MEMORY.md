@@ -187,6 +187,38 @@ Reference: ik_llama.cpp PR #1251 (closed, "Qwen 3 Next experiment" by YurkoHoshk
 
 **This converts Phase 20j-20o from "write 4-6 new shaders from scratch" to "port 4 existing shaders + 1 small greenfield + 1 supports_op fix."** The shipping order — L2_NORM (trivial uncomment) → SOFTPLUS (port) → SSM_CONV (port) → FUSED_MUL_UNARY broadcast (local fix) → MUL_MULTI_ADD (greenfield) → DELTA_NET (port + op_params translation).
 
+## Phase 20n: Vulkan SSM_CONV full coverage (2026-04-08)
+
+Ported all 5 SSM_CONV CUDA kernels from ik PR #1251 (`ggml-cuda/ssm-conv.cu`, 608 lines) to Vulkan in three layers:
+
+**Single-sequence fast path** (Qwen3.5 single-stream inference, the headline target):
+- 3 SPVs: `ssm_conv_x.comp` (NC4 + general) + `ssm_conv_final_state.comp`
+- Parallel over (row, token); two dispatches per call (conv output + final-state writeback)
+- Qwen3.5-35B-A3B-UD-IQ3_XXS on 6800 XT: graph splits 122 → **62**, **pp256 3.47 → 12.69 t/s (+266%)**, tg32 0.32 → 0.36 (modest because DELTA_NET still dominates the per-token critical path)
+
+**Multi-sequence slow path** (correctness for any n_kv, any sq layout):
+- 6 SPVs: `ssm_conv_init_states.comp` (NC4 + general) + `ssm_conv_slow.comp` (NC4 × HAS_MULTI_SEQ × {ungated})
+- Init kernel pre-fills dst_state from src0 for all n_kv sequences so untouched seqs survive the batch
+- Slow kernel walks tokens serially per row, handling self-recurrence (state shift), invalid seq ids, and multi-target fanout
+
+**Multi-sequence unique-fast path** (parallel-over-tokens optimization for serving):
+- 7 SPVs: `ssm_conv_validate.comp` + `ssm_conv_unique.comp` (NC4 + general) + `ssm_conv_slow.comp` GATED variants (NC4 × HAS_MULTI_SEQ)
+- GPU-side `fast_path_ok` atomic flag — validate kernel atomically clears it if seq map has out-of-range / fanout / recurrence
+- Both unique-fast and slow_gated dispatched together; one early-exits based on the flag (matches CUDA reference exactly)
+- Persistent SSBO `ssm_conv_atomic_buf` per `vk_device`, lazily allocated, grown on demand (rounded to 4096 entries)
+- Layout: `[fast_path_ok, seq_seen[n_kv], seq_ids[n_t]]`
+
+Total: 6 shader files, 16 SPV variants, ~700 LOC across shaders + C++ wiring.
+
+Verification (Vega 64 + 6800 XT both):
+- 1258/1258 baseline tests pass (1252 + 6 new SSM_CONV cases for multi-seq)
+- 13 SSM_CONV cases: 7 single-seq + 6 multi-seq (unique × 2 batch sizes × 2 nc, recurrent × 2 nc, fanout × 1)
+- No regression on dense MUL_MAT, FUSED_UP_GATE, MOE_FUSED_UP_GATE, L2_NORM, GROUPED_TOPK, MUL_MULTI_ADD, FUSED_MUL_UNARY
+
+The non-obvious bit: ggml itself enforces `sq->ne[0] == n_kv` (line 10337 of `ggml/src/ggml.c`), so the "n_kv=1, sq->ne[0]>1" corner case I considered planning for is unreachable. There are exactly 4 dispatch paths: single-seq fast, multi-seq init+slow, multi-seq init+validate+unique+slow_gated (the validate decides at runtime which of unique/slow_gated does the work).
+
+Remaining CPU bottlenecks for Qwen3.5: 60 DELTA_NET (the heaviest op, next phase) + 2 GET_ROWS. After DELTA_NET ships, splits should drop to ~3 and tg should jump significantly.
+
 ## Phase 20j-20m: Qwen3.5-A3B Vulkan op ports (2026-04-08)
 
 Shipped 4 of the 6 missing ops over a single working session:
