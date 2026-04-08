@@ -134,6 +134,18 @@ The split source: **`GGML_OP_GROUPED_TOPK` is not in the Vulkan supports_op list
 
 Bug A (separate): `-fmoe=1` (default) makes pp eval 5× slower than `-fmoe=0` for MoE on Vulkan. Phase 20b's N=1 skip works for tg but the prompt-eval path still goes through fused MoE. Either fix the fused-moe pp path or change the default to `-fmoe=0` for MoE models on Vulkan.
 
+## Phase 20h: Vulkan MOE_FUSED_UP_GATE shader (2026-04-08)
+
+Bug A fixed by adding the missing GGML_OP_MOE_FUSED_UP_GATE Vulkan implementation. The op was defined in ggml.h and implemented for CPU+CUDA, but not Vulkan, so multi-token MoE prompt-eval went through unfused fallback.
+
+Implementation: extended the existing dense `mul_mm_fused_up_gate.comp` with a `MUL_MAT_ID` build flag mirroring the upstream `mul_mm.comp` MUL_MAT_ID branches. Push constants are layout-shared between dense and MoE — macro aliases (`p_nei0`/`p_nei1`/`p_nbi1`/`p_ne11`) re-interpret the dense `ne0X/broadcast` slots as the MoE indirection fields, so a single C struct serves both. Backported the full IQ family (IQ1_S..IQ4_XS) into the dense fused_up_gate gen as well, since IQ3_XXS is the target model.
+
+The non-obvious bug: a buffer subbuffer scoping mistake. The dispatch passed `b_sz = sizeof(float) * ne10 * ne11` to the b binding, which is one token's worth of data. The shader strides across tokens via `row_idx.y * batch_stride_b`, so it needs the FULL tensor visible to the binding. Fix: `b_sz = sizeof(float) * ne10 * ne11 * b->ne[2]`. Single-token cases passed (only token 0 was needed), but multi-token cases produced zero output for tokens > 0 because the GPU's bounds-protected reads outside the bound subbuffer returned zero. Diagnosed by reading `buf_b` shared memory back into `dst` from the write loop and observing col 1 = 0 even though the load formula was correct.
+
+Headline result: Qwen3.5-35B-A3B-UD-IQ3_XXS pp256 on 6800 XT with default `-fmoe=1`: 3.47 t/s (vs the broken 0.71 t/s pre-fix and the unfused 3.42 t/s baseline). The fused path is now at parity with unfused on this model — the inference graph no longer falls back to CPU for the fused MoE FFN op. Test coverage: 40 new test_moe_fused_up_gate cases pass on both Vega 64 (RDNA-GCN5) and 6800 XT (RDNA2) on top of the existing 1237/1237 baseline and 143/143 dense FUSED_UP_GATE cases.
+
+Note for Phase 20i: the headline `tg32 = 0.31 t/s` is unchanged because token gen is bottlenecked by `GROUPED_TOPK` falling back to CPU (322 graph splits per token). 20h was a prerequisite (so the fused MoE path is GPU-resident), but the tg headline win has to wait for Phase 20i.
+
 f16acc dispatch counter (Phase 20c instrumentation) on this MoE model showed `hits=0 fallbacks=43704`. Hits=0 is correct on RDNA2 (f16acc is Vega-only). On Vega the same 43704 dispatches would hit the f16acc path — but the bottleneck is graph_splits, not compute, so the f16acc work cannot move the needle until Phase 20h lands.
 
 ## Build Notes
