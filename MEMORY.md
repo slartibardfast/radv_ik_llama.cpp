@@ -115,6 +115,27 @@
 - Remaining 3 failures: MUL_MAT_ID(iq3_xxs) marginal, 2x CPY f32→iq4_nl.
 - Also discovered: `ggml_internal_get_type_traits(GGML_TYPE_IQ4_XS).to_float` requires `ggml_init()` first — the `ggml_table_f32_f16` lookup table is populated lazily during init. Standalone tests that skip init get zeros from dequantize functions.
 
+## Phase 20g: Multi-GPU MoE root cause = GROUPED_TOPK CPU fallback (2026-04-08)
+
+Target: Qwen3.5-35B-A3B-UD-IQ3_XXS (12.17 GiB / 34.66 B params, MoE 256 experts × 8 active, 40 layers, n_kv_head=2, head_dim=256). Dual-GPU rig: RDNA2 6800 XT 16 GiB + Vega 64 8 GiB.
+
+Measured baselines (single-GPU 6800 XT, post-Phase-20f reduce fix):
+- pp256 / tg64 = **0.71 / 0.31 t/s** with default flags
+- pp256 / tg64 = **3.42 / 0.31 t/s** with `-fmoe 0` (5× pp gain, tg unchanged because Phase 20b already skips fused-moe for N=1)
+- Compare dense Llama-2-13B Q8_0 same GPU, similar VRAM (12.88 GiB): **511 / 27.7 t/s** — MoE is **150-720× slower per token**.
+
+Multi-GPU layer-split (`-sm layer -ts 0.67/0.33`) gives **0.63 / 0.27 t/s** — same as single-GPU. **Multi-GPU is not the bottleneck.**
+
+Root cause found via `llama-cli ... 2>&1`: prints **`graph splits = 322`** for Qwen3.5 MoE on Vulkan (compare ~3 splits for dense models). 322 splits = ~161 CPU↔GPU round-trip boundaries × ~10 ms each = ~3.2 sec/token of pure sync overhead, matching measured wall time. GPU-side compute is healthy (~15 ms/token via `GGML_VK_PERF_LOGGER=1` per-op timings).
+
+The split source: **`GGML_OP_GROUPED_TOPK` is not in the Vulkan supports_op list** at `ggml/src/ggml-vulkan.cpp:9905-9923`. The op is defined in `ggml.h:658` and used by `llm_build_moe_ffn` at `llama-build-context.cpp:1131` for expert routing (`ggml_grouped_topk`). Every layer's expert selection therefore falls back to CPU, splitting the graph into hundreds of fragments.
+
+**Phase 20h scope** (next plan): implement `GROUPED_TOPK` on the Vulkan backend (one new compute shader + dispatch wiring). Expected outcome: graph_splits drops from 322 → ~3, tg perf goes from 0.31 → ~25-40 t/s for Qwen3.5-35B-A3B IQ3_XXS, matching dense-model expectations.
+
+Bug A (separate): `-fmoe=1` (default) makes pp eval 5× slower than `-fmoe=0` for MoE on Vulkan. Phase 20b's N=1 skip works for tg but the prompt-eval path still goes through fused MoE. Either fix the fused-moe pp path or change the default to `-fmoe=0` for MoE models on Vulkan.
+
+f16acc dispatch counter (Phase 20c instrumentation) on this MoE model showed `hits=0 fallbacks=43704`. Hits=0 is correct on RDNA2 (f16acc is Vega-only). On Vega the same 43704 dispatches would hit the f16acc path — but the bottleneck is graph_splits, not compute, so the f16acc work cannot move the needle until Phase 20h lands.
+
 ## Build Notes
 - Use clang (GCC 15 has -Wtemplate-body errors)
 - `-DGGML_IQK_FLASH_ATTENTION=OFF` on non-AVX2 hosts
