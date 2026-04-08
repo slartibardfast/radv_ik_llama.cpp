@@ -187,6 +187,25 @@ Reference: ik_llama.cpp PR #1251 (closed, "Qwen 3 Next experiment" by YurkoHoshk
 
 **This converts Phase 20j-20o from "write 4-6 new shaders from scratch" to "port 4 existing shaders + 1 small greenfield + 1 supports_op fix."** The shipping order — L2_NORM (trivial uncomment) → SOFTPLUS (port) → SSM_CONV (port) → FUSED_MUL_UNARY broadcast (local fix) → MUL_MULTI_ADD (greenfield) → DELTA_NET (port + op_params translation).
 
+## Phase 20j-20m: Qwen3.5-A3B Vulkan op ports (2026-04-08)
+
+Shipped 4 of the 6 missing ops over a single working session:
+
+| Phase | Op | Source | CPU instances cleared | Splits change |
+|---|---|---|---|---|
+| 20j | `L2_NORM` (non-contig) | Ported upstream `l2_norm.comp` (PR #19604), our local fork already had the shader and dispatch fn but commented out — replaced contiguous-only variant with the upstream non-contig one and uncommented the case statements | 120 | 322 → 262 |
+| 20k | `UNARY` SOFTPLUS | Ported upstream `softplus.comp` (PR #17319) + new pipeline arrays + wired into existing CREATE_UNARY macro | 60 | 262 → 202 |
+| 20l | `MUL_MULTI_ADD` | Greenfield (ik-only op). Wrote `mul_multi_add.comp` from scratch — single-shader, one workgroup per (k_block, token) pair, accumulates the per-expert weighted sum | 80 | 202 → 122 |
+| 20m | `FUSED_MUL_UNARY` (SIGMOID + scalar broadcast) | Local fix. The op was already supported for SILU/GELU/RELU same-shape, but Qwen3.5 uses `ggml_fused_mul_unary(scalar_gate, [n_ff], SIGMOID)` for shared-expert gating — needed (1) a new `fused_mul_sigmoid.comp` shader, (2) `BCAST` define added to the existing 3 shaders + new sigmoid one for the scalar-broadcast case, (3) `supports_op` extended to accept `ggml_nelements(src0) == 1`, and (4) the dispatch picks the bcast variant when src0 is a single element. The 8 new pipelines (silu/gelu/relu/sigmoid × bcast × f32+f16) cover both the existing fusions and the new Qwen3.5 path. | 40 (compute moved) | 122 (unchanged — these ops were already adjacent to SSM CPU stretches so didn't add new splits, but the compute is now on GPU) |
+
+**Total: 322 → 122 splits, -62%.** Remaining 122 splits are SSM_CONV (60) + DELTA_NET (60) + 2 GET_ROWS, all part of the SSM/Mamba layer stretches.
+
+Headline tg32 on 6800 XT: 0.31 → 0.32 t/s — barely moved despite the split count drop. The SSM/DELTA-NET layers still execute on CPU and consume the bulk of the per-layer time, so eliminating the cheap ops (L2_NORM, SOFTPLUS, MUL_MULTI_ADD, FUSED_MUL_UNARY) just frees them from CPU but doesn't reduce the critical path. The big wins are still SSM_CONV and DELTA_NET.
+
+**Phase 20n (deferred for next iteration): SSM_CONV.** The ik fork uses a 4-arg `ggml_ssm_conv(s, x, c, sq)` (state, input, conv-weights, sequence-indices) which is the older "stateful" form, NOT the upstream 2-arg form (`ggml_ssm_conv(a, b)`) that the upstream Vulkan shader handles. I attempted a port using the upstream `ssm_conv.comp` but had to back it out — the shader doesn't match our op semantics. Reference: ik PR #1251 (closed, "Qwen 3 Next experiment") added a CUDA port (`ggml-cuda/ssm-conv.cu`, 608 lines, ProgenyAlpha-style). Need to either port that CUDA logic to Vulkan, or refactor the ik op to match upstream's 2-arg form (riskier).
+
+**Phase 20o (deferred): DELTA_NET.** Same problem — ik fork has a different signature than upstream. The upstream Vulkan port (PR #20334, ProgenyAlpha) handles `GATED_DELTA_NET`. ik's `DELTA_NET` op shares some semantics but the CPU implementation is in `iqk/iqk_cpu_ops.cpp`. Will need study against ik PR #1251 + upstream #20334 to map between the two forms. This is the heaviest op (most expensive in compute) so it's the biggest perf win.
+
 f16acc dispatch counter (Phase 20c instrumentation) on this MoE model showed `hits=0 fallbacks=43704`. Hits=0 is correct on RDNA2 (f16acc is Vega-only). On Vega the same 43704 dispatches would hit the f16acc path — but the bottleneck is graph_splits, not compute, so the f16acc work cannot move the needle until Phase 20h lands.
 
 ## Build Notes
