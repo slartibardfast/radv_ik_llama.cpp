@@ -146,6 +146,18 @@ Headline result: Qwen3.5-35B-A3B-UD-IQ3_XXS pp256 on 6800 XT with default `-fmoe
 
 Note for Phase 20i: the headline `tg32 = 0.31 t/s` is unchanged because token gen is bottlenecked by `GROUPED_TOPK` falling back to CPU (322 graph splits per token). 20h was a prerequisite (so the fused MoE path is GPU-resident), but the tg headline win has to wait for Phase 20i.
 
+## Phase 20i: Vulkan GROUPED_TOPK shader (2026-04-08)
+
+Added the GGML_OP_GROUPED_TOPK Vulkan implementation as a single fused compute shader (`grouped_topk_f32.comp`), one workgroup per token row. All stages (per-group sort + sum, group selection, masking, global sort, write top-k indices) run in shared memory with no temp buffers. 7/7 test cases pass on both Vega 64 and 6800 XT covering Qwen3.5 and DeepSeek-style shapes.
+
+**However**: this op is NOT what was bottlenecking Qwen3.5-35B-A3B-UD-IQ3_XXS. The Phase 20g diagnosis was wrong on the root cause. With `GGML_SCHED_DEBUG=2` it's clear that Qwen3.5 uses ordinary `ARGSORT` (which is already on Vulkan) for expert routing, not `GROUPED_TOPK`. The 322 graph splits per layer come from two other ops:
+
+- `GGML_OP_MUL_MULTI_ADD` (80 CPU instances) — the fork's multi-expert gather-and-add op, used to combine the routed expert outputs (`routed_out` = sum over experts of `ffn_moe_down * ffn_moe_weights_norm`). Defined in `ggml.h:623`, implemented in CPU at `ggml.c:6213` and CUDA at `ggml-cuda.cu:3475/4656`. **Not in Vulkan supports_op at all** — `grep MUL_MULTI_ADD ggml-vulkan.cpp` returns nothing. This is a 1-shader implementation that should be straightforward to port.
+
+- `GGML_OP_FUSED_MUL_UNARY` (40 CPU instances) — the dense FUSED_MUL_UNARY op IS in Vulkan, but for the `ffn_shexp_gated` (shared expert gate) calls the supports_op check at `ggml-vulkan.cpp:11785` rejects them because `op->src[0]` (`shared_expert_ga…`) and `op->src[1]` (`ffn_shexp_out…`) don't pass the `ggml_are_same_shape` check. Likely a broadcast pattern that needs separate support.
+
+Phase 20i still ships GROUPED_TOPK because it's correct, well-tested, and the right op for any model that uses it (DeepSeek-V3, BailingMoE, etc.). The Qwen3.5 headline gain has to wait for Phase 20j (MUL_MULTI_ADD) and Phase 20k (FUSED_MUL_UNARY broadcast).
+
 f16acc dispatch counter (Phase 20c instrumentation) on this MoE model showed `hits=0 fallbacks=43704`. Hits=0 is correct on RDNA2 (f16acc is Vega-only). On Vega the same 43704 dispatches would hit the f16acc path — but the bottleneck is graph_splits, not compute, so the f16acc work cannot move the needle until Phase 20h lands.
 
 ## Build Notes
