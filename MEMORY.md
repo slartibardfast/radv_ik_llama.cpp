@@ -336,6 +336,42 @@ architectural (2× more ops per token for Mamba), not an optimization bug.
 Polaris-jit branch's megakernel/JIT was confirmed dead (12% slower than
 standard dispatch). Op-level fusions are the proven pattern.
 
+## Model survey and deployment findings (2026-04-09)
+
+Downloaded and benchmarked Qwen3.5-122B-A10B UD-Q4_K_XL (72G, 3 split
+files) and Qwen3.5-35B-A3B Q4_K_M (20.5G single file) for multi-GPU
+inference on the RDNA2 + Vega rig.
+
+**Qwen3.5-122B-A10B UD-Q4_K_XL** (122B params, 10B active MoE):
+- 72G model, -ngl 14, -sm layer -ts 0.67/0.33, 65K context viable
+- Vulkan0: 14.9G, Vulkan1: 6.3G — both within VRAM
+- tg: 1.6-2.1 t/s — CPU-bandwidth-bound (56 of 80 layers on DDR4)
+- A 122B model running at interactive speed on consumer AMD hardware
+
+**Qwen3.5-35B-A3B Q4_K_M** (35B params, 3B active MoE):
+- 20.5G model, -ngl 999 -sm layer, 65K context, ALL layers on GPU
+- Vulkan0: 14.8G (layers 0-27), Vulkan1: 7.1G (layers 28-40 + lm_head)
+- pp256: 117 t/s, tg64: 11.3 t/s, graph splits: 3
+- Multi-GPU +18% over single-GPU (11.3 vs 9.6 t/s)
+- 2× faster than existing 5 t/s server on the same model
+- Profiling: 82% of wall time is CPU dispatch overhead (1482 dispatches
+  × ~51 μs each). GPU compute is only 16 ms. Our Phase 20 Vulkan ops
+  (DELTA_NET 19 μs, SSM_CONV 8 μs, FUSED 4 μs) are negligible.
+
+**IQ3_XXS vs Q4_K_M for tool calling**: the 11 vs 18 t/s gap is small.
+Q4_K_M has PPL 6.6 vs ~7.0 and KLD 0.55 vs 1.53 — substantially
+better structured output reliability. For tool calling use cases, Q4_K_M
+on dual-GPU is the correct deployment choice.
+
+**Hybrid Mamba context efficiency**: Qwen3.5-35B-A3B at 65K context uses
+only 1.3G of KV cache (10 attention layers out of 40). A pure transformer
+of similar size would need ~10G+. This makes long-context deployable on
+consumer GPU VRAM where pure transformers cannot fit.
+
+**Disk cleanup**: removed 164G of unused models (Nemotron-3-Nano 3 of 4
+quants, GLM-4.7-Flash, embedding models, HF safetensors duplicates) to
+make room for the 122B download. 158G free on /opt after cleanup.
+
 ## Build Notes
 - Use clang (GCC 15 has -Wtemplate-body errors)
 - `-DGGML_IQK_FLASH_ATTENTION=OFF` on non-AVX2 hosts
